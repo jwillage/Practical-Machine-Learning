@@ -1,7 +1,7 @@
 ---
 title: "Practical Machine Learning Project"
 author: "Joe Willage"
-date: "October 9, 2015"
+date: "October 24, 2015"
 output: html_document
 ---
 
@@ -15,6 +15,18 @@ suppressWarnings(library(randomForest))
 set.seed(2)
 modelFit <- readRDS("rf_5_folds.rds")
 ```
+
+## Introduction  
+
+This paper will examine Human Activity Recognition (HAR) using machine learning 
+techniques. The data comes from a study found 
+[here](http://groupware.les.inf.puc-rio.br/har). The Weight Lifting Exercise 
+had six individuals lifting dumbbells in various ways. They each lifted the 
+dumbbells the correct specified way (classe A), as well as four incorrect ways, 
+that correspond to common mistakes (classes B - E). Data from the movements was 
+collected with sensors on each individual's arm, forearm, belt, and the 
+dumbbell. Using this data, we explored various machine learning methods to 
+predict the manner an individual performed the exercise. 
 
 ## Preprocessing
 
@@ -200,9 +212,8 @@ cm$table
 We see that the model predicts with `r round(cm$overall[1], 4)` accuracy. This 
 amounts to an **out of sample error** of 
 $1 - `r round(cm$overall[1], 4)` * 100 = \%`r (1 - round(cm$overall[1], 4)) * 100`$. 
-
-\n
-
+  
+  
 ## Appendix
 
 **Figure 1**  
@@ -241,41 +252,3 @@ Output of final randomForest run.
 ```{r apdx rf final}
 print(modelFitRF.18.375)
 ```
-## Misc old
-
-
-
-```{r k-folds, eval = F, echo=F}
-
-folds.train <- createFolds(y = training$classe, k = 5, list = TRUE, 
-                     returnTrain = TRUE)
-folds.test <- createFolds(y = training$classe, k = 5, list = TRUE, 
-                     returnTrain = FALSE)
-
-fitControl    <- trainControl(method = "none")
-tgrid           <- expand.grid(mtry=c(6))
-modelFit <- train(classe ~ ., data = training, method = "rf", trControl = fitControl, tuneGrid = tgrid)
-```
-
-
-
-We now examine the accuracy as a function of the number of predictors chosen in 
-the random forest algorithm
-
-```{r rf plot}
-plot(modelFit)
-```
-We see that two predictors (`mtry = 2`) yields the highest accuracy.
-
-It's finally starting to make sense. Here is what I've gathered. The methods for cross-validation depend on the function being called: train or randomForest. 
-
-In the train function, cross-validation can be performed internally. You can pass in a trainControl object, ie trainControl(method = "repeatedcv", number = 5). For the rest of this post, assume k=5. Train will split the data set into 5 folds. Each mtry (2, 19, 36, etc) is tried 5 different times (5 folds * 1 repitition). For each fold, train is training on 4/5 of the data and testing on the remaining 1/5. This is standard k-fold as we see in the lecture. The results of this testing can be considered "out-of-sample", since it compares the missing fifth against the 4/5 that were trained. Train then comes up with the Accuracy for each fold, which is 1 - "out-of-sample". Finally, it reports back Accuracy for each mtry, averaged across the 5 folds. Accuracy SD is the SD across the 5 folds. Train picks the mtry with the highest accuracy to use as the final model. If using only the train function, you should be able to report out-of-sample error as 1 - highest Accuracy. 
-
-However if your final model is created using the randomForest function, no cross validation per se is performed internally. However, we are given an out of bag (OOB) error estimate. Each tree is built using samples from the original data we pass to randomForest. Due to this sampling, each tree will leave out some rows (36.8% default). These rows are called out-of-bag samples. After each tree is built, the out-of-bag samples are run through the forest. Since those samples are from our original training set, we know what class they belong to and we can find out which ones the model predicts incorrectly. That is the out-of-bag error rate. I would say this can also be as an estimate for "out-of-sample" error. That's because the tree was built without those rows and then tested against them. It's similar to explicitly splitting up your data set and passing some rows to build a model, and then testing that model against the other rows.
-
-It should be noted that these "cross-validation" methods for train and randomForest use all of the data that you pass it. Taking into account all of the folds, train will use all the data (really after the second fold you've used all the data). Taking into account all the trees, rf will use all the data (not guaranteed, but we can confirm this in a minute).
-
-Another interesting note is that randomForest also produces an output called err.rate, which is a matrix whose length is the number of trees. After each tree is added to the forest, The OOB estimate is calculated. You can examine those numbers to see at what point the rate seems to plateau, and trim the number of trees. 
-
-A final interesting note is that randomForest also produces an output called oob.times, which is a vector whose length is the number of training rows. Each value corresponds to the number of times that row has been left out of a tree. You can confirm that all rows have been used by checking if any row has been left out for every tree (model$oob.times == ntree, 500 is the default ntree). 
-
