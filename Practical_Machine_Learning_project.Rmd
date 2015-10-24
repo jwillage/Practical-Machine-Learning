@@ -1,0 +1,281 @@
+---
+title: "Practical Machine Learning Project"
+author: "Joe Willage"
+date: "October 9, 2015"
+output: html_document
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(cache=TRUE)
+library(caret)
+library(MASS)
+library(rpart)
+suppressWarnings(library(party))
+suppressWarnings(library(randomForest))
+set.seed(2)
+modelFit <- readRDS("rf_5_folds.rds")
+```
+
+## Preprocessing
+
+Before anything else, we need to load in our training data set. 
+
+
+```{r load data, cache = T}
+training.full <- read.csv("data/pml-training.csv", na.strings = "")
+```
+
+We'll want to do a little exploratory data analysis. Let's take a look at the 
+first few rows of data (Appendix, fig. 1). There appear to be a lot of NA 
+values. We check which columns have a high percentage of NAs (fig. 2).
+
+These are all the columns with more than 20% NAs. We see that they include 
+variables such as kurotsis, skew, max, min, amplitude. These are all summaries 
+of the data. In fact, if we open the training CSV file, we see these fields are 
+only filled in where new_window is "yes". We decide to eliminate these columns 
+for our analysis, and only take the columns which are the raw X, Y, Z sensor 
+measures. 
+
+So we will work with the non-summarized rows of data (`new_window == 'no'`). 
+From these rows, we take the X, Y, and Z measurement of gyro, acceleration, and 
+magnet for each of the four sensor points (belt, arm, dumbbell, forearm). This 
+leaves us with 3 * 3 * 4 = 36 features + classe. 
+
+```{r subset cols}
+cols <- grep("_[xyz]$", names(training.full), value = T)
+cols <- append(cols, "classe")
+training.sub <- subset(training.full, new_window == "no")
+```
+
+We also want to split our training data into two subsets, so we can perform 
+cross-validation. We'll save 25% of the data for testing.
+
+```{r create partitions}
+inTrain <- createDataPartition(y = training.sub$classe, p = .75, list = FALSE)
+training <- training.sub[inTrain, cols]
+testing <- training.sub[-inTrain, cols]
+```
+
+
+We further validate our features by checking if there are any covariates that 
+have little variability with the nerZeroVar command. We find there are none 
+(fig. 3).
+
+
+## Method selection
+
+The first method we try is linear discriminant analysis. This method performs 
+classification using linear combinations of features.  
+
+```{r lda}
+modelFitLda <- train(classe ~ ., data = training, method = "lda")
+modelFitLda$results$Accuracy 
+```
+
+Linear Discriminant Analysis yields a very poor accuracy. This is not 
+surprising, we wouldn't expect that x-y-z sensor readings can accurately be 
+modeled by a linear method. 
+
+Next we look at a tree based approach, using rpart. 
+
+```{r rpart}
+modelFitRpart <- train(classe ~ ., data = training, method = "rpart")
+modelFitRpart$results$Accuracy[1]
+```
+
+This gives us a worse prediction than lda, as rpart has less than 50% accuracy.  
+
+Another tree-based approach is ctree, from the party library. The difference 
+between this and rpart is that ctree tests for the null hypothesis between 
+predictors and the response, and branches based on which variable has the 
+smallest p-value. Rpart, on the other hand, branches based on measures of 
+impurity (defaults to gini). 
+
+```{r ctree}
+modelFitCtree <- train(classe ~ ., data = training, method = "ctree")
+modelFitCtree$results
+```
+
+This is a vast improvement over rpart, but still lower accuracy then we'd like. 
+
+Next we'll look at random forests. We choose a k-fold cross validation with 5 
+folds to train. We train and predict on each of the 5 folds, then average the 
+out of bag error rate to get an idea of what the error rate will be on our test 
+set.  
+
+
+```{r 5 folds rf}
+fitControl    <- trainControl(method = "repeatedcv", number = 5)
+modelFit <- train(classe ~ ., data = training, method = "rf", 
+                  trControl = fitControl)
+modelFit
+```
+
+This gives us a very high accuracy, so we will continue to tune this method. We 
+also note that the most accurate forest was built with only 2 variables selected 
+at each split. Selecting more variables decreased the accuracy, in this case. 
+
+## Random Forest Refinement and Training
+We will switch from the caret library to randomForest, which gives more robust 
+options. We can also examine the features that contributed most to the models. 
+
+```{r importance}
+head(varImp(modelFit)[[1]][order(varImp(modelFit)[[1]], decreasing = TRUE), ,
+                           drop = F])
+```
+
+The top three features are the magnet sensors in the dumbbell. Let's see if we 
+can trim down the number of features, based on the importance. 
+
+```{r rfcv}
+cv <- rfcv(training[,-37], training[,37], cv.fold = 5)
+cv$error.cv
+```
+
+So if we only include half the features (18), our error rate about doubles. This 
+leaves us with 18 features and an error rate of `r round(cv$error.cv[2], 4)`. 
+We'll move forward with that. We create a new df with only the 18 features and 
+the response.
+
+```{r 18 features}
+features.18 <- rownames(varImp(modelFit)[[1]]
+                        [order(varImp(modelFit)[[1]], decreasing = TRUE)
+                        [1:18], , drop = F])
+features.18 <- append(features.18, "classe")
+training.18 <- training.full[inTrain, features.18]
+testing.18 <- training.full[-inTrain, features.18]
+```
+
+Now we'll call tuneRF to determine what number mtry will reduce our error.
+
+```{r tuneRF}
+tuneRF(training.18[, -19], training.18[, 19], mtryStart = 2)
+```
+
+The mtry with the smallest OOB error is 4, which we will pass into our 
+randomForest call
+
+```{r rf 18}
+modelFitRF.18 <- randomForest(classe ~ ., data = training.18, mtry = 4)
+```
+
+Finally we fine-tune the parameters based on the outputs from our run. We see 
+that the final OOB err rate will be around 
+`r round(modelFitRF.18$err.rate[modelFitRF.18$ntree, 1], 4)` (fig. 4). So we'll 
+stop growing trees when our moving average is around that point. 
+
+```{r ntree}
+oob.final <- modelFitRF.18$err.rate[modelFitRF.18$ntree, 1]
+nt <- modelFitRF.18$ntree
+window <- 25
+ntree.lower <- seq(0, nt - window, by = window)
+chunks <- lapply(as.list(ntree.lower), function(x) seq(x, (x + window)))
+OOB.mean <- sapply(chunks, function(x) mean(modelFitRF.18$err.rate[x, "OOB"]))
+cbind(ntree.lower, ntree.lower + window, OOB.mean, 
+      1 - abs(1-(oob.final/OOB.mean)))
+```
+
+The average OOB error at 375 - 400 trees gets us about 99% of the way there. 
+We'll rebuild our model with ntree = 400 instead of 500 (fig. 5). 
+
+```{r less trees}
+modelFitRF.18.375 <- randomForest(classe ~ ., data = training.18, mtry = 4, 
+                                  ntree = 400)
+oob <- modelFitRF.18.375$err.rate[modelFitRF.18.375$ntree, 1]
+```
+
+
+## Testing  
+
+Now we fit the model to the testing subset of our data. The OOB estimate is 
+generally a good proxy for out-of-sample error. That rate is 
+`r round(oob, 4)`. Let's see if the true out-of-sample error is similar. We 
+predict on our test data, which was the 25% that we tucked away at the begining. 
+
+```{r confusionMatrix}
+cm <- confusionMatrix(testing.18$classe, predict(modelFitRF.18.375, testing.18[, -37]))
+cm$table
+```
+
+We see that the model predicts with `r round(cm$overall[1], 4)` accuracy. This 
+amounts to an **out of sample error** of 
+$1 - `r round(cm$overall[1], 4)` * 100 = \%`r (1 - round(cm$overall[1], 4)) * 100`$. 
+
+\n
+
+## Appendix
+
+**Figure 1**  
+
+Seeing what the training data looks like.
+```{r apdx head}
+head(training.full)
+```
+
+**Figure 2**
+
+Finding out which columns have a high percentage of NAs.
+```{r apdx NAs}
+n <- nrow(training.full)
+cols.na <- apply(training.full, 2, function(x) sum(!complete.cases(x))/n) 
+names(training.full)[cols.na > .20]
+```
+
+**Figure 3**
+
+Checking if any values have near-zero variance.  
+```{r apdx nzv}
+nearZeroVar(training, saveMetrics = T)
+```
+
+**Figure 4**
+
+Output of first randomForest run. 
+```{r apdx first rf out}
+print(modelFitRF.18)
+```
+
+**Figure 5**
+
+Output of final randomForest run.
+```{r apdx rf final}
+print(modelFitRF.18.375)
+```
+## Misc old
+
+
+
+```{r k-folds, eval = F, echo=F}
+
+folds.train <- createFolds(y = training$classe, k = 5, list = TRUE, 
+                     returnTrain = TRUE)
+folds.test <- createFolds(y = training$classe, k = 5, list = TRUE, 
+                     returnTrain = FALSE)
+
+fitControl    <- trainControl(method = "none")
+tgrid           <- expand.grid(mtry=c(6))
+modelFit <- train(classe ~ ., data = training, method = "rf", trControl = fitControl, tuneGrid = tgrid)
+```
+
+
+
+We now examine the accuracy as a function of the number of predictors chosen in 
+the random forest algorithm
+
+```{r rf plot}
+plot(modelFit)
+```
+We see that two predictors (`mtry = 2`) yields the highest accuracy.
+
+It's finally starting to make sense. Here is what I've gathered. The methods for cross-validation depend on the function being called: train or randomForest. 
+
+In the train function, cross-validation can be performed internally. You can pass in a trainControl object, ie trainControl(method = "repeatedcv", number = 5). For the rest of this post, assume k=5. Train will split the data set into 5 folds. Each mtry (2, 19, 36, etc) is tried 5 different times (5 folds * 1 repitition). For each fold, train is training on 4/5 of the data and testing on the remaining 1/5. This is standard k-fold as we see in the lecture. The results of this testing can be considered "out-of-sample", since it compares the missing fifth against the 4/5 that were trained. Train then comes up with the Accuracy for each fold, which is 1 - "out-of-sample". Finally, it reports back Accuracy for each mtry, averaged across the 5 folds. Accuracy SD is the SD across the 5 folds. Train picks the mtry with the highest accuracy to use as the final model. If using only the train function, you should be able to report out-of-sample error as 1 - highest Accuracy. 
+
+However if your final model is created using the randomForest function, no cross validation per se is performed internally. However, we are given an out of bag (OOB) error estimate. Each tree is built using samples from the original data we pass to randomForest. Due to this sampling, each tree will leave out some rows (36.8% default). These rows are called out-of-bag samples. After each tree is built, the out-of-bag samples are run through the forest. Since those samples are from our original training set, we know what class they belong to and we can find out which ones the model predicts incorrectly. That is the out-of-bag error rate. I would say this can also be as an estimate for "out-of-sample" error. That's because the tree was built without those rows and then tested against them. It's similar to explicitly splitting up your data set and passing some rows to build a model, and then testing that model against the other rows.
+
+It should be noted that these "cross-validation" methods for train and randomForest use all of the data that you pass it. Taking into account all of the folds, train will use all the data (really after the second fold you've used all the data). Taking into account all the trees, rf will use all the data (not guaranteed, but we can confirm this in a minute).
+
+Another interesting note is that randomForest also produces an output called err.rate, which is a matrix whose length is the number of trees. After each tree is added to the forest, The OOB estimate is calculated. You can examine those numbers to see at what point the rate seems to plateau, and trim the number of trees. 
+
+A final interesting note is that randomForest also produces an output called oob.times, which is a vector whose length is the number of training rows. Each value corresponds to the number of times that row has been left out of a tree. You can confirm that all rows have been used by checking if any row has been left out for every tree (model$oob.times == ntree, 500 is the default ntree). 
+
